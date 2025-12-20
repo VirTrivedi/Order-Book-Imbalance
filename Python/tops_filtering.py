@@ -182,22 +182,17 @@ def write_csv(records: List[Dict[str, Any]], output_path: str):
 
 
 def main():
-    if len(sys.argv) > 1:
-        input_file = sys.argv[1]
-    else:
-        input_file = input("Enter input .bin file path: ").strip()
+    if len(sys.argv) != 3:
+        print("Usage: python tops_filtering.py <input_bin_file> <output_csv_file>")
+        print("Example: python tops_filtering.py data.bin output.csv")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
     
     if not Path(input_file).exists():
         print(f"Error: Input file '{input_file}' does not exist")
         sys.exit(1)
-    
-    if len(sys.argv) > 2:
-        output_file = sys.argv[2]
-    else:
-        input_path = Path(input_file)
-        default_output = input_path.stem + "_filtered.csv"
-        output_input = input(f"Enter output .csv file path (default: {default_output}): ").strip()
-        output_file = output_input if output_input else default_output
     
     print(f"\nReading binary file: {input_file}")
     records = read_bin_file(input_file)
