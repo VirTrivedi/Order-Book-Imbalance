@@ -12,6 +12,149 @@ plt.rcParams['figure.figsize'] = (12, 8)
 # Price scale constant
 PRICE_SCALE = 1e9
 
+def plot_order_flow_response(pooled_df: pd.DataFrame, fills_files: dict, symbols: list, 
+                             output_dir: str, window_ms: int = 1000, obi_threshold: float = 0.3):
+    """Plot cumulative signed trade volume around OBI events."""
+    print(f"\nGenerating order flow response plots...")
+    output_path = Path(output_dir)
+    
+    # Load fills data for all symbols
+    fills_data = {}
+    for symbol in symbols:
+        if symbol in fills_files:
+            fills_df = pd.read_csv(fills_files[symbol])
+            fills_df = fills_df.sort_values('ts').reset_index(drop=True)
+            fills_data[symbol] = fills_df
+            print(f"  Loaded {len(fills_df)} fills for {symbol}")
+    
+    if not fills_data:
+        print("  Warning: No fills data available, skipping order flow response plot")
+        return
+    
+    window_ns = window_ms * 1_000_000
+    time_bins = np.linspace(-window_ms, window_ms, 41)
+    
+    # Analyze for OBI1 and OBI3
+    for obi_col in ['obi1', 'obi3']:
+        print(f"\n  Analyzing {obi_col.upper()}...")
+        
+        positive_obi_flow = {t: [] for t in time_bins[:-1]}
+        negative_obi_flow = {t: [] for t in time_bins[:-1]}
+        
+        for symbol in symbols:
+            if symbol not in fills_data:
+                continue
+                
+            symbol_df = pooled_df[pooled_df['symbol'] == symbol].copy()
+            fills_df = fills_data[symbol]
+            
+            strong_positive = symbol_df[symbol_df[obi_col] > obi_threshold]
+            strong_negative = symbol_df[symbol_df[obi_col] < -obi_threshold]
+            
+            print(f"    {symbol}: {len(strong_positive)} positive, {len(strong_negative)} negative events")
+            
+            fills_ts = fills_df['ts'].values
+            fills_signed_vol = fills_df['signed_volume'].values
+
+            # Process positive OBI events
+            if len(strong_positive) > 0:
+                event_times = strong_positive['ts'].values
+                
+                for event_ts in event_times:
+                    mask = (fills_ts >= event_ts - window_ns) & (fills_ts <= event_ts + window_ns)
+                    
+                    if not mask.any():
+                        continue
+                    
+                    rel_times = (fills_ts[mask] - event_ts) / 1_000_000
+                    volumes = fills_signed_vol[mask]
+                    
+                    bin_indices = np.digitize(rel_times, time_bins) - 1
+                    
+                    for i, t in enumerate(time_bins[:-1]):
+                        bin_mask = bin_indices == i
+                        if bin_mask.any():
+                            positive_obi_flow[t].append(volumes[bin_mask].sum())
+            
+            # Process negative OBI events
+            if len(strong_negative) > 0:
+                event_times = strong_negative['ts'].values
+                
+                for event_ts in event_times:
+                    mask = (fills_ts >= event_ts - window_ns) & (fills_ts <= event_ts + window_ns)
+                    
+                    if not mask.any():
+                        continue
+                    
+                    rel_times = (fills_ts[mask] - event_ts) / 1_000_000
+                    volumes = fills_signed_vol[mask]
+                    
+                    bin_indices = np.digitize(rel_times, time_bins) - 1
+                    
+                    for i, t in enumerate(time_bins[:-1]):
+                        bin_mask = bin_indices == i
+                        if bin_mask.any():
+                            negative_obi_flow[t].append(volumes[bin_mask].sum())
+        
+        time_centers = (time_bins[:-1] + time_bins[1:]) / 2
+        
+        positive_mean_flow = []
+        positive_std_flow = []
+        for t in time_bins[:-1]:
+            if positive_obi_flow[t]:
+                positive_mean_flow.append(np.mean(positive_obi_flow[t]))
+                positive_std_flow.append(np.std(positive_obi_flow[t]) / np.sqrt(len(positive_obi_flow[t])))
+            else:
+                positive_mean_flow.append(0)
+                positive_std_flow.append(0)
+        
+        negative_mean_flow = []
+        negative_std_flow = []
+        for t in time_bins[:-1]:
+            if negative_obi_flow[t]:
+                negative_mean_flow.append(np.mean(negative_obi_flow[t]))
+                negative_std_flow.append(np.std(negative_obi_flow[t]) / np.sqrt(len(negative_obi_flow[t])))
+            else:
+                negative_mean_flow.append(0)
+                negative_std_flow.append(0)
+        
+        positive_cumulative = np.cumsum(positive_mean_flow)
+        negative_cumulative = np.cumsum(negative_mean_flow)
+        
+        positive_cumulative_std = np.sqrt(np.cumsum(np.array(positive_std_flow)**2))
+        negative_cumulative_std = np.sqrt(np.cumsum(np.array(negative_std_flow)**2))
+        
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        ax.plot(time_centers, positive_cumulative, linewidth=2.5, color='darkgreen', 
+                label=f'Positive {obi_col.upper()} (>{obi_threshold})', marker='o', markersize=4)
+        ax.fill_between(time_centers,
+                        positive_cumulative - positive_cumulative_std,
+                        positive_cumulative + positive_cumulative_std,
+                        alpha=0.2, color='darkgreen')
+        
+        ax.plot(time_centers, negative_cumulative, linewidth=2.5, color='darkred', 
+                label=f'Negative {obi_col.upper()} (<-{obi_threshold})', marker='s', markersize=4)
+        ax.fill_between(time_centers,
+                        negative_cumulative - negative_cumulative_std,
+                        negative_cumulative + negative_cumulative_std,
+                        alpha=0.2, color='darkred')
+        
+        ax.axvline(0, color='black', linestyle='--', linewidth=2, alpha=0.7, label='Imbalance Event')
+        ax.axhline(0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+        
+        ax.set_xlabel('Time Relative to Imbalance Event (ms)', fontsize=13)
+        ax.set_ylabel('Cumulative Signed Volume (shares)', fontsize=13)
+        ax.set_title(f'Order Flow Response to {obi_col.upper()} Events - Pooled ({", ".join(symbols)})', 
+                     fontsize=15, fontweight='bold')
+        ax.legend(fontsize=12, loc='best')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        output_file = output_path / f'order_flow_response_{obi_col}.png'
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"  Saved: {output_file}")
+        plt.close()
 
 def calculate_future_returns(df: pd.DataFrame, delta_ms_list: list = [10, 100, 1000]) -> pd.DataFrame:
     """Calculate future mid-price returns at various time horizons."""    
@@ -508,6 +651,14 @@ def main():
     pooled_df = plot_pooled_obi_distribution(csv_files, symbols, output_dir)
     plot_future_return_vs_obi(pooled_df, symbols, output_dir)
     plot_predictive_decay(pooled_df, symbols, output_dir)
+
+    fills_files = {}
+    for symbol in symbols:
+        fills_path = Path(csv_files[0]).parent / f"{symbol}_fills_filtered_output.csv"
+        if fills_path.exists():
+            fills_files[symbol] = str(fills_path)
+
+    plot_order_flow_response(pooled_df, fills_files, symbols, output_dir)
 
     print("\nAll plots generated successfully!")
 
